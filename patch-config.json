@@ -3,6 +3,10 @@
     {
       "app_name": "quranify",
       "source": "hxreborn"
+    },
+    {
+      "app_name": "ilovepdf",
+      "source": "hxreborn"
     }
   ]
 }
