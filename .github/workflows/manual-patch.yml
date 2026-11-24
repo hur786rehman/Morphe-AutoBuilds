@@ -10,12 +10,12 @@ on:
         description: 'App name (from apps/ folder)'
         required: true
         type: string
-        default: 'youtube'
+        default: 'quranify'
       source:
         description: 'Source name (from sources/ folder)'
         required: true
         type: string
-        default: 'revanced'
+        default: 'hxreborn'
       version:
         description: 'Specific version (leave empty for latest)'
         required: false
@@ -55,13 +55,10 @@ jobs:
       - name: Set Specific Version (if provided)
         if: ${{ inputs.version != '' }}
         run: |
-          # Update app config with specific version
           for dir in apps/apkmirror apps/apkpure apps/uptodown; do
             config_file="$dir/${{ inputs.app_name }}.json"
             if [ -f "$config_file" ]; then
               echo "Updating $config_file with version ${{ inputs.version }}"
-              # Update JSON with specific version (single line to avoid
-              # indentation issues inside python -c)
               python3 -c "import json; p='$config_file'; c=json.load(open(p)); c['version']='${{ inputs.version }}'; json.dump(c, open(p, 'w'), indent=2)"
               echo "Updated: $config_file"
               break
@@ -110,14 +107,12 @@ jobs:
       - name: Find Built APK
         id: find-apk
         run: |
-          # Find the built APK file(s)
           apk_files=$(ls -1 *.apk 2>/dev/null)
           if [ -z "$apk_files" ]; then
             echo "❌ No APK files found"
             exit 1
           fi
           
-          # Fix for multi-line output in GitHub Actions
           {
             echo "apk_files<<EOF"
             echo "$apk_files"
@@ -125,8 +120,6 @@ jobs:
           } >> "$GITHUB_OUTPUT"
           
           echo "apk_count=$(echo "$apk_files" | wc -l)" >> "$GITHUB_OUTPUT"
-          
-          # Print for debugging
           echo "Found these APKs:"
           echo "$apk_files"
       
@@ -135,56 +128,27 @@ jobs:
         with:
           name: manual-apk-${{ inputs.app_name }}-${{ inputs.architecture }}
           path: "*.apk"
-      
-      - name: Install Publisher Dependencies
-        if: ${{ inputs.replace_in_release == true }}
-        run: pip install requests
 
-      - name: Publish to GitLab Releases
+      - name: Publish to GitHub Releases
         if: ${{ inputs.replace_in_release == true }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: Patched APKs (Latest)
+          files: "*.apk"
+          prerelease: false
         env:
-          GITLAB_TOKEN: ${{ secrets.GITLAB_TOKEN }}
-          GITLAB_PROJECT_ID: "88812153"
-        run: |
-          if [ -z "$GITLAB_TOKEN" ]; then
-            echo "GITLAB_TOKEN secret is not set on this repo."
-            exit 1
-          fi
-          mkdir -p ./release-apks
-          cp -f *.apk ./release-apks/ 2>/dev/null || true
-          python scripts/gitlab_publish_release.py \
-            --apks-dir ./release-apks \
-            --merge
-
-      - name: Verify GitLab Release Health
-        if: always() && ${{ inputs.replace_in_release == true }}
-        env:
-          GITLAB_TOKEN: ${{ secrets.GITLAB_TOKEN }}
-          GITLAB_PROJECT_ID: "88812153"
-        run: |
-          # Safety net for the 2026-10-09 / 2026-10-22 failure mode: if the
-          # publish step died after the tag move, GitLab is left with the tag
-          # but zero releases, and the store shows every patched app as
-          # unavailable. Verify health; on failure run the proven
-          # --rebuild-links recovery once, then fail loudly if still broken.
-          if python scripts/gitlab_publish_release.py --verify-only --tag latest; then
-            echo "GitLab release verified healthy."
-          else
-            echo "Release unhealthy; running automatic recovery..."
-            python scripts/gitlab_publish_release.py --rebuild-links --tag latest
-            python scripts/gitlab_publish_release.py --verify-only --tag latest
-          fi
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Publish Summary
         if: ${{ inputs.replace_in_release == true }}
         run: |
           count=$(ls -1 *.apk 2>/dev/null | wc -l)
-          echo "Published $count APK(s) to the release."
+          echo "Published $count APK(s) to GitHub Releases."
 
       - name: Cleanup Version Override
         if: ${{ inputs.version != '' && always() }}
         run: |
-          # Reset version to empty in configs
           for dir in apps/apkmirror apps/apkpure apps/uptodown; do
             config_file="$dir/${{ inputs.app_name }}.json"
             if [ -f "$config_file" ]; then
