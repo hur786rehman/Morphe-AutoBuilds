@@ -15,43 +15,6 @@ on:
     - cron: '0 6 * * *'  # Daily at 6 AM UTC
 
 jobs:
-  download-tools:
-    name: Download Morphe Tools
-    runs-on: ubuntu-latest
-    if: ${{ false }}
-    outputs:
-      cache-key: ${{ steps.cache-key.outputs.cache-key }}
-    steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-      
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: 3.11
-      
-      - name: Download Morphe Tools
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          mkdir -p tools
-          curl -L "https://github.com/revanced/revanced-cli/releases/latest/download/revanced-cli-all.jar" -o tools/revanced-cli.jar
-          curl -L "https://github.com/revanced/revanced-patches/releases/latest/download/patches.jar" -o tools/patches.jar
-          curl -L "https://github.com/revanced/revanced-integrations/releases/latest/download/app-release-unsigned.apk" -o tools/integrations.apk
-      
-      - name: Cache Tools
-        uses: actions/cache@v4
-        id: cache-tools
-        with:
-          path: tools/
-          key: revanced-tools-${{ hashFiles('patch-config.json', 'arch-config.json') }}
-      
-      - name: Generate Cache Key
-        id: cache-key
-        run: echo "cache-key=${{ steps.cache-tools.outputs.cache-key || 'no-cache' }}" >> $GITHUB_OUTPUT
-
   check-updates:
     name: Check for Updates
     runs-on: ubuntu-latest
@@ -90,11 +53,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           FORCE_FULL_REBUILD: ${{ inputs.force_full_rebuild || 'false' }}
-          # Release state now lives on GitLab: the planner reads manifest.json
-          # and the APK list from the GitLab release instead of GitHub's.
-          MORPHE_PLATFORM: gitlab
-          GITLAB_TOKEN: ${{ secrets.GITLAB_TOKEN }}
-          GITLAB_PROJECT_ID: "88812153" # Could use ${{ secrets.GITHUB_PROJECTID }} instead
+          MORPHE_PLATFORM: github
         run: |
           python scripts/check_app_updates.py
 
@@ -160,12 +119,6 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Restore Cached Tools
-        uses: actions/cache@v4
-        with:
-          path: tools/
-          key: revanced-tools-${{ hashFiles('patch-config.json', 'arch-config.json') }}
-
       - name: Install Python
         uses: actions/setup-python@v5
         with:
@@ -203,39 +156,13 @@ jobs:
           FLARESOLVERR_URL: http://localhost:8192/v1
         run: |
           echo "Building ${{ matrix.app_name }} with ${{ matrix.source }}..."
-          sleep $((RANDOM % 30)).$((RANDOM % 100))
-          
           python -m src
-
-      - name: Record Build Outputs
-        if: always()
-        env:
-          APP_NAME: ${{ matrix.app_name }}
-          SOURCE: ${{ matrix.source }}
-        run: |
-          mkdir -p build_records
-          # Record every produced APK so manifest can map (app, source, arch) -> filename
-          for apk in *.apk; do
-            [ -e "$apk" ] || continue
-            # record_build.py now detects arch from filename automatically
-            APK_PATH="$apk" python scripts/record_build.py || true
-          done
-          echo "Records produced:"
-          ls -la build_records/ 2>/dev/null || echo "(no records)"
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
           name: apk-${{ matrix.app_name }}-${{ matrix.source }}
           path: "*.apk"
-
-      - name: Upload Build Records
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-records-${{ matrix.app_name }}-${{ matrix.source }}
-          path: build_records/
-          if-no-files-found: ignore
 
   create-single-release:
     name: Create Single Release
@@ -249,152 +176,19 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Download Build Plan
-        uses: actions/download-artifact@v4
-        with:
-          name: build-plan
-          path: ./build-plan
-        continue-on-error: true
-
       - name: Download All APK Artifacts
         uses: actions/download-artifact@v4
         with:
-          path: ./all-apks
           pattern: apk-*
+          merge-multiple: true
+          path: ./release-apks
 
-      - name: Download All Build Records
-        uses: actions/download-artifact@v4
+      - name: Publish to GitHub Releases
+        uses: softprops/action-gh-release@v2
         with:
-          path: ./all-records
-          pattern: build-records-*
-        continue-on-error: true
-
-      - name: Check if Any APKs Were Built
-        id: check-apks
-        run: |
-          built_count=$(find ./all-apks -name "*.apk" 2>/dev/null | wc -l)
-          echo "Built APKs: $built_count"
-
-          if [ "$built_count" -eq 0 ]; then
-            echo "❌ No rebuilt APKs available"
-            echo "skip_release=true" >> $GITHUB_OUTPUT
-          else
-            echo "✅ $built_count rebuilt APK(s) ready for release"
-            echo "skip_release=false" >> $GITHUB_OUTPUT
-          fi
-      
-      - name: Collect All APKs
-        if: steps.check-apks.outputs.skip_release == 'false'
-        run: |
-          mkdir -p ./release-apks
-          echo "📦 Collecting rebuilt APKs..."
-          find ./all-apks -name "*.apk" -exec cp -f {} ./release-apks/ \; 2>/dev/null || true
-
-          echo "📁 APKs ready for release:"
-          ls -la ./release-apks/
-
-          final_count=$(ls -1 ./release-apks/*.apk 2>/dev/null | wc -l || echo "0")
-          echo "📊 Total APKs: $final_count"
-
-      - name: Build Final Manifest
-        if: steps.check-apks.outputs.skip_release == 'false'
-        run: |
-          echo "🧾 Building manifest.json from build-plan + build records..."
-          # The new_manifest.json (post-plan baseline) lives in the build-plan artifact
-          if [ -f ./build-plan/new_manifest.json ]; then
-            cp ./build-plan/new_manifest.json ./new_manifest.json
-          fi
-          # Flatten all per-build records into one directory
-          mkdir -p build_records
-          if [ -d ./all-records ]; then
-            find ./all-records -name "*.json" -exec cp {} build_records/ \; 2>/dev/null || true
-          fi
-          python scripts/merge_manifest.py || {
-            echo "⚠️ merge_manifest.py failed; continuing without manifest update."
-            rm -f manifest.json
-          }
-          if [ -f manifest.json ]; then
-            echo "✅ manifest.json built:"
-            jq '.entries | length' manifest.json || true
-            cp manifest.json ./release-apks/manifest.json
-          fi
-
-      - name: Validate GitHub Auth
-        if: steps.check-apks.outputs.skip_release == 'false'
+          tag_name: latest
+          name: Patched APKs (Latest)
+          files: "./release-apks/*.apk"
+          prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          python scripts/validate_github_auth.py
-
-      - name: Install Publisher Dependencies
-        if: steps.check-apks.outputs.skip_release == 'false'
-        run: pip install requests
-
-      - name: Check GitLab token
-        id: gitlab-token
-        env:
-          GITLAB_TOKEN: ${{ secrets.GITLAB_TOKEN }}
-        run: |
-          if [ -n "$GITLAB_TOKEN" ]; then
-            echo "available=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "available=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Publish to GitLab Releases
-        if: steps.check-apks.outputs.skip_release == 'false' && steps.gitlab-token.outputs.available == 'true'
-        env:
-          GITLAB_TOKEN: ${{ secrets.GITLAB_TOKEN }}
-          GITLAB_PROJECT_ID: "88812153" # Could use ${{ secrets.GITHUB_PROJECTID }} instead
-        run: |
-          if [ -z "$GITLAB_TOKEN" ]; then
-            echo "GITLAB_TOKEN secret is not set on this repo."
-            exit 1
-          fi
-          # gitlab_publish_release.py --merge: uploads new APKs + manifest to the
-          # GitLab generic package registry, add/replaces their release asset
-          # links, deletes superseded older-version APKs, refreshes notes.
-          # Upload-first-then-cleanup order is preserved inside the script.
-          python scripts/gitlab_publish_release.py \
-            --apks-dir ./release-apks \
-            --merge
-
-      - name: Verify GitLab Release Health
-        if: always() && steps.check-apks.outputs.skip_release == 'false' && steps.gitlab-token.outputs.available == 'true'
-        env:
-          GITLAB_TOKEN: ${{ secrets.GITLAB_TOKEN }}
-          GITLAB_PROJECT_ID: "88812153"
-        run: |
-          # Safety net for the 2026-10-09 / 2026-10-22 failure mode: if the
-          # publish step died after the tag move, GitLab is left with the tag
-          # but zero releases, and the store shows every patched app as
-          # unavailable. Verify health; on failure run the proven
-          # --rebuild-links recovery once, then fail loudly if still broken.
-          if python scripts/gitlab_publish_release.py --verify-only --tag latest; then
-            echo "GitLab release verified healthy."
-          else
-            echo "Release unhealthy; running automatic recovery..."
-            python scripts/gitlab_publish_release.py --rebuild-links --tag latest
-            python scripts/gitlab_publish_release.py --verify-only --tag latest
-          fi
-
-      - name: Publish Summary
-        if: steps.check-apks.outputs.skip_release == 'false'
-        run: |
-          count=$(ls -1 ./release-apks/*.apk 2>/dev/null | wc -l)
-          echo "Published $count APK(s) plus manifest to the release."
-
-  cleanup:
-    name: Cleanup Workflow Runs
-    needs: [build-apps, create-single-release]
-    runs-on: ubuntu-latest
-    if: always()
-    permissions:
-      actions: write
-    steps:
-      - name: Delete Old Workflow Runs
-        uses: Mattraks/delete-workflow-runs@v2
-        with:
-          retain_days: 3
-          keep_minimum_runs: 5
